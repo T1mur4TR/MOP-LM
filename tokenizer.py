@@ -19,24 +19,38 @@ class MOPiece:
             self.suffix_ids = {suffix: i for i, suffix in enumerate(self.suffixes) if suffix}
         with open(directory_path / 'spm.model', 'rb') as f: 
             self.spm = SentencePieceProcessor(model_proto=f.read())
+        self.re = re.compile('([^\\p{L}\\p{M}\\p{N}])')
 
-    def bos_id():
+    def bos_id(self):
         return 0
     
-    def eos_id():
+    def eos_id(self):
         return 1
     
-    def pad_id():
+    def pad_id(self):
         return 2
     
-    def unk_id():
+    def unk_id(self):
         return 3
     
-    def encode(self, sentences: Iterable[str]) -> List[List[Tuple[List[int], List[int], List[int]]]]:
-        tokenized_sentences = []
+    def vocab_size(self):
+        return len(self.prefixes), self.spm.vocab_size(), len(self.suffixes)
+    
+    def encode(self, sentences: Iterable[str], morpheme_first: bool=False) -> List[List[Tuple[List[int], List[int], List[int]]]] | Tuple[List[List[List[int]]], List[List[List[int]]], List[List[List[int]]]]:
+        if morpheme_first:
+            prefix_tokens = []
+            spm_tokens = []
+            suffix_tokens = []
+        else:
+            tokenized_sentences = []
         for sentence in sentences:
-            sentence_ids = []
-            for word in re.split('([^\\p{L}\\p{M}\\p{N}])', sentence):
+            if morpheme_first:
+                sentence_prefix_ids = []
+                sentence_spm_ids = []
+                sentence_suffix_ids = []
+            else:
+                sentence_ids = []
+            for word in self.re.split(sentence):
                 if word == '' or word == ' ':
                     continue
                 word = word.lower()
@@ -63,13 +77,30 @@ class MOPiece:
                             break
                 spm_ids = self.spm.encode(word[l:r])
                 suffix_ids.reverse()
-                sentence_ids.append((prefix_ids, spm_ids, suffix_ids))
-            tokenized_sentences.append(sentence_ids)
-        return tokenized_sentences
+                if morpheme_first:
+                    sentence_prefix_ids.append(prefix_ids)
+                    sentence_spm_ids.append(spm_ids)
+                    sentence_suffix_ids.append(suffix_ids)
+                else:
+                    sentence_ids.append((prefix_ids, spm_ids, suffix_ids))
+            if morpheme_first:
+                prefix_tokens.append(sentence_prefix_ids)
+                spm_tokens.append(sentence_spm_ids)
+                suffix_tokens.append(sentence_suffix_ids)
+            else:
+                tokenized_sentences.append(sentence_ids)
+        if morpheme_first:
+            return prefix_tokens, spm_tokens, suffix_tokens
+        else:
+            return tokenized_sentences
     
-    def decode(self, tokenized_sentences: Iterable[Iterable[Tuple[Iterable[int], Iterable[int], Iterable[int]]]]) -> List[str]:
+    def decode(self, tokenized_sentences: Iterable[Iterable[Tuple[Iterable[int], Iterable[int], Iterable[int]]]] | Tuple[Iterable[Iterable[Iterable[int]]], Iterable[Iterable[Iterable[int]]], Iterable[Iterable[Iterable[int]]]], morpheme_first: bool=False) -> List[str]:
         decoded_sentences = []
+        if morpheme_first:
+            tokenized_sentences = zip(*tokenized_sentences)
         for sentence_ids in tokenized_sentences:
+            if morpheme_first:
+                sentence_ids = zip(*sentence_ids)
             words = []
             for prefix_ids, spm_ids, suffix_ids in sentence_ids:
                 parts = [self.prefixes[prefix_id] for prefix_id in prefix_ids]
@@ -85,11 +116,12 @@ class MOPiece:
 def train_mopiece(directory_path: str | Path, filepath_iterable: Iterable[str | Path], prefixes: Iterable[str], suffixes: Iterable[str], spm_vocab_size: int, spm_model_type: str='unigram', min_stem: int=3):
     prefixes_set = set(prefixes)
     suffixes_set = set(suffixes)
+    reg = re.compile('([^\\p{L}\\p{M}\\p{N}])')
     def stems():
         for file in filepath_iterable:
             with open(file, mode='r', encoding='utf8') as file:
                 for line in file.readlines():
-                    for word in re.split('([^\\p{L}\\p{M}\\p{N}])', line):
+                    for word in reg.split(line):
                         if word == '' or word == ' ':
                             continue
                         word = word.lower()
