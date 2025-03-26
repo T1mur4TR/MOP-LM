@@ -36,6 +36,32 @@ class MOPiece:
     def vocab_size(self):
         return len(self.prefixes), self.spm.vocab_size(), len(self.suffixes)
     
+    def encode_word(self, word: str) -> Tuple[List[int], List[int], List[int]]:
+        word = word.lower()
+        prefix_ids = []
+        suffix_ids = []
+        l, r = 0, len(word)
+        found = True
+        while found:
+            found = False
+            for i in range(l + self.min_stem, r):
+                if word[i:r] in self.suffix_ids:
+                    suffix_ids.append(self.suffix_ids[word[i:r]])
+                    r = i
+                    found = True
+                    break
+        found = True
+        while found:
+            found = False
+            for i in range(r - self.min_stem, l, -1):
+                if word[l:i] in self.prefix_ids:
+                    prefix_ids.append(self.prefix_ids[word[l:i]])
+                    l = i
+                    found = True
+                    break
+        spm_ids = self.spm.encode(word[l:r])
+        return prefix_ids[::-1], spm_ids, suffix_ids[::-1]
+
     def encode(self, sentences: Iterable[str], morpheme_first: bool=False) -> List[List[Tuple[List[int], List[int], List[int]]]] | Tuple[List[List[List[int]]], List[List[List[int]]], List[List[List[int]]]]:
         if morpheme_first:
             prefix_tokens = []
@@ -53,30 +79,7 @@ class MOPiece:
             for word in self.re.split(sentence):
                 if word == '' or word == ' ':
                     continue
-                word = word.lower()
-                prefix_ids = []
-                suffix_ids = []
-                l, r = 0, len(word)
-                found = True
-                while found:
-                    found = False
-                    for i in range(l + self.min_stem, r):
-                        if word[i:r] in self.suffix_ids:
-                            suffix_ids.append(self.suffix_ids[word[i:r]])
-                            r = i
-                            found = True
-                            break
-                found = True
-                while found:
-                    found = False
-                    for i in range(r - self.min_stem, l, -1):
-                        if word[l:i] in self.prefix_ids:
-                            prefix_ids.append(self.prefix_ids[word[l:i]])
-                            l = i
-                            found = True
-                            break
-                spm_ids = self.spm.encode(word[l:r])
-                suffix_ids.reverse()
+                prefix_ids, spm_ids, suffix_ids = self.encode_word(word)
                 if morpheme_first:
                     sentence_prefix_ids.append(prefix_ids)
                     sentence_spm_ids.append(spm_ids)
@@ -103,11 +106,9 @@ class MOPiece:
                 sentence_ids = zip(*sentence_ids)
             words = []
             for prefix_ids, spm_ids, suffix_ids in sentence_ids:
-                parts = [self.prefixes[prefix_id] for prefix_id in prefix_ids]
+                parts = [self.prefixes[prefix_id] for prefix_id in reversed(prefix_ids)]
                 parts.append(self.spm.decode(spm_ids))
-                for suffix_id in suffix_ids:
-                    suffix = self.suffixes[suffix_id]
-                    parts.append(suffix)
+                parts.extend(self.suffixes[suffix_id] for suffix_id in suffix_ids)
                 words.append(''.join(parts))
             decoded_sentences.append(' '.join(words))
         return decoded_sentences
