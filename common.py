@@ -65,10 +65,10 @@ class MultiheadCrossAttention(nn.Module):
             torch.Tensor: output tensor with shape [..., L, E]
         """
         batch_shape = x.shape[:-2]
-        L = x.shape[-2]
+        L, S = x.shape[-2], y.shape[-2]
         q = self.q(x).view(*batch_shape, L, self.num_heads, self.query_dim).transpose(-2, -3)
-        k = self.k(y).view(*batch_shape, L, self.num_heads, self.query_dim).transpose(-2, -3)
-        v = self.v(y).view(*batch_shape, L, self.num_heads, self.value_dim).transpose(-2, -3)
+        k = self.k(y).view(*batch_shape, S, self.num_heads, self.query_dim).transpose(-2, -3)
+        v = self.v(y).view(*batch_shape, S, self.num_heads, self.value_dim).transpose(-2, -3)
 
         if attn_mask is not None and attn_mask.dim() <= x.dim(): # handle same mask for all heads
             attn_mask = attn_mask.unsqueeze(-3)
@@ -277,7 +277,7 @@ class Decoder(nn.Module):
 
     def forward(self, x, y, attn_mask=None, cross_attn_mask=None):
         for i in range(self.n_layers):
-            x = x + self.MHSAs[i](self.norms[2 * i](x), attn_mask)
-            x = x + self.MHCAs[i](self.norms[2 * i + 1](x), y, cross_attn_mask)
-            x = x + self.FFNs[i](self.norms[2 * i + 2](x))
+            x = x + self.MHSAs[i](self.norms[3 * i](x), attn_mask)
+            x = x + self.MHCAs[i](self.norms[3 * i + 1](x), y, cross_attn_mask)
+            x = x + self.FFNs[i](self.norms[3 * i + 2](x))
         return x
