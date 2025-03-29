@@ -19,7 +19,7 @@ class MOPiece:
             self.suffix_ids = {suffix: i for i, suffix in enumerate(self.suffixes) if suffix}
         with open(directory_path / 'spm.model', 'rb') as f: 
             self.spm = SentencePieceProcessor(model_proto=f.read())
-        self.re = re.compile('([^\\p{L}\\p{M}\\p{N}])')
+        self.re = re.compile(r'([^\p{L}\p{M}\p{N}\s]+|\s)')
 
     def bos_id(self):
         return 0
@@ -117,7 +117,7 @@ class MOPiece:
 def train_mopiece(directory_path: str | Path, filepath_iterable: Iterable[str | Path], prefixes: Iterable[str], suffixes: Iterable[str], spm_vocab_size: int, spm_model_type: str='unigram', min_stem: int=3):
     prefixes_set = set(prefixes)
     suffixes_set = set(suffixes)
-    reg = re.compile('([^\\p{L}\\p{M}\\p{N}])')
+    reg = re.compile(r'([^\p{L}\p{M}\p{N}\s]+|\s)')
     def stems():
         for file in filepath_iterable:
             with open(file, mode='r', encoding='utf8') as file:
