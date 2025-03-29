@@ -3,6 +3,7 @@ from torch import nn
 import torch.nn.functional as F
 
 
+
 class MultiheadSelfAttention(nn.Module):
     def __init__(self, embedding_dim, query_dim, value_dim, num_heads, dropout=0.):
         super().__init__()
@@ -168,6 +169,14 @@ class RoPEMHSA(MultiheadSelfAttention):
         self.RoPE = RoPE(query_dim, cache_size, base)
 
     def forward(self, x, attn_mask=None):
+        """
+        Args:
+            x (torch.Tensor): input tensor with shape [..., L, E]
+            attn_mask (Optional[torch.Tensor]): boolean (float) attention mask (bias) with shape [..., L, L] or [..., H, L, L]
+
+        Returns:
+            torch.Tensor: output tensor with shape [..., L, E]
+        """
         batch_shape = x.shape[:-2]
         L = x.shape[-2]
         qk = self.qk(x).view(*batch_shape, L, 2, self.num_heads, self.query_dim).transpose(-3, -4).contiguous()
@@ -180,3 +189,95 @@ class RoPEMHSA(MultiheadSelfAttention):
         out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=(self.dropout if self.training else 0.))
 
         return self.out_proj(out.transpose(-2, -3).flatten(-2))
+    
+
+class LOREMHSA(MultiheadSelfAttention):
+    def __init__(self, embedding_dim, query_dim, value_dim, num_heads, dropout=0, cache_size=512, base=10000):
+        super().__init__(embedding_dim, query_dim, value_dim, num_heads, dropout)
+
+        self.RoPE = RoPE(query_dim, cache_size, base)
+
+        self.lore_q = nn.Linear(query_dim, query_dim)
+        self.lore_k = nn.Linear(query_dim, query_dim)
+
+    def forward(self, x, attn_mask=None):
+        """
+        Args:
+            x (torch.Tensor): input tensor with shape [..., L, E]
+            attn_mask (Optional[torch.Tensor]): boolean (float) attention mask (bias) with shape [..., L, L] or [..., H, L, L]
+
+        Returns:
+            torch.Tensor: output tensor with shape [..., L, E]
+        """
+        batch_shape = x.shape[:-2]
+        L = x.shape[-2]
+        qk = self.qk(x).view(*batch_shape, L, 2, self.num_heads, self.query_dim).transpose(-3, -4).contiguous()
+        q, k = self.RoPE(qk).view(*batch_shape, 2 * self.num_heads, L, self.query_dim).chunk(2, dim=-3)
+        q, k = self.lore_q(q), self.lore_k(k)
+        v = self.v(x).view(*batch_shape, L, self.num_heads, self.value_dim).transpose(-2, -3)
+
+        if attn_mask is not None and attn_mask.dim() <= x.dim(): # handle same mask for all heads
+            attn_mask = attn_mask.unsqueeze(-3)
+
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=(self.dropout if self.training else 0.))
+
+        return self.out_proj(out.transpose(-2, -3).flatten(-2))
+
+
+class FFN(nn.Module):
+    def __init__(self, embedding_dim, hidden_dim, dropout=0., act=F.silu):
+        super().__init__()
+        self.w1 = nn.Linear(embedding_dim, hidden_dim)
+        self.w2 = nn.Linear(hidden_dim, embedding_dim)
+        self.dropout = nn.Dropout(p=dropout)
+        self.act = act
+
+    def forward(self, x):
+        return self.w2(self.dropout(self.act(self.w1(x))))
+    
+
+class GLUFFN(nn.Module):
+    def __init__(self, embedding_dim, hidden_dim, dropout=0., act=F.silu):
+        super().__init__()
+        self.w13 = nn.Linear(embedding_dim, 2 * hidden_dim)
+        self.w2 = nn.Linear(hidden_dim, embedding_dim)
+        self.dropout = nn.Dropout(p=dropout)
+        self.act = act
+
+    def forward(self, x):
+        x1, x3 = self.w13(x).chunk(2, dim=-1)
+        return self.w2(self.dropout(self.act(x1)) * x3)
+    
+
+class Encoder(nn.Module):
+    def __init__(self, n_layers, MHSA_factory, FFN_factory, norm_factory):
+        super().__init__()
+
+        self.n_layers = n_layers
+        self.MHSAs = nn.ModuleList([MHSA_factory() for _ in range(n_layers)])
+        self.FFNs = nn.ModuleList([FFN_factory() for _ in range(n_layers)])
+        self.norms = nn.ModuleList([norm_factory() for _ in range(2 * n_layers)])
+
+    def forward(self, x, attn_mask=None):
+        for i in range(self.n_layers):
+            x = x + self.MHSAs[i](self.norms[2 * i](x), attn_mask)
+            x = x + self.FFNs[i](self.norms[2 * i + 1](x))
+        return x
+
+
+class Decoder(nn.Module):
+    def __init__(self, n_layers, MHSA_factory, MHCA_factory, FFN_factory, norm_factory):
+        super().__init__()
+
+        self.n_layers = n_layers
+        self.MHSAs = nn.ModuleList([MHSA_factory() for _ in range(n_layers)])
+        self.MHCAs = nn.ModuleList([MHCA_factory() for _ in range(n_layers)])
+        self.FFNs = nn.ModuleList([FFN_factory() for _ in range(n_layers)])
+        self.norms = nn.ModuleList([norm_factory() for _ in range(3 * n_layers)])
+
+    def forward(self, x, y, attn_mask=None, cross_attn_mask=None):
+        for i in range(self.n_layers):
+            x = x + self.MHSAs[i](self.norms[2 * i](x), attn_mask)
+            x = x + self.MHCAs[i](self.norms[2 * i + 1](x), y, cross_attn_mask)
+            x = x + self.FFNs[i](self.norms[2 * i + 2](x))
+        return x
