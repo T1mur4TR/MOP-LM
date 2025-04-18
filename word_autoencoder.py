@@ -144,15 +144,48 @@ class WordDecoder(nn.Module):
         embedding = embedding.unsqueeze(-2)
 
         prefix_pad_mask = prefix_ids != self.pad_id
-        prefix_attn_mask = prefix_pad_mask.unsqueeze(-1) & prefix_pad_mask.unsqueeze(-2) 
+        prefix_attn_mask = pt.tril(prefix_pad_mask.unsqueeze(-1) & prefix_pad_mask.unsqueeze(-2))
         prefix_logits = self.prefix_linear(self.prefix_norm(self.prefix_decoder(self.prefix_embedding(prefix_ids), embedding, prefix_attn_mask, prefix_pad_mask.unsqueeze(-1))))
 
         spm_pad_mask = spm_ids != self.pad_id
-        spm_attn_mask = spm_pad_mask.unsqueeze(-1) & spm_pad_mask.unsqueeze(-2) 
+        spm_attn_mask = pt.tril(spm_pad_mask.unsqueeze(-1) & spm_pad_mask.unsqueeze(-2))
         spm_logits = self.spm_linear(self.spm_norm(self.spm_decoder(self.spm_embedding(spm_ids), embedding, spm_attn_mask, spm_pad_mask.unsqueeze(-1))))
 
         suffix_pad_mask = suffix_ids != self.pad_id
-        suffix_attn_mask = suffix_pad_mask.unsqueeze(-1) & suffix_pad_mask.unsqueeze(-2) 
+        suffix_attn_mask = pt.tril(suffix_pad_mask.unsqueeze(-1) & suffix_pad_mask.unsqueeze(-2))
         suffix_logits = self.suffix_linear(self.suffix_norm(self.suffix_decoder(self.suffix_embedding(suffix_ids), embedding, suffix_attn_mask, suffix_pad_mask.unsqueeze(-1))))
 
         return prefix_logits, spm_logits, suffix_logits
+    
+    @pt.inference_mode()
+    def inference(self, embedding, max_len=64):
+        self.eval()
+        if isinstance(max_len, int):
+            max_len = (max_len, max_len, max_len)
+
+        embedding = embedding.unsqueeze(-2)
+        device = embedding.device
+
+        prefix_ids = [self.bos_id]
+        for _ in range(max_len[0]):
+            next_token = self.prefix_linear(self.prefix_norm(self.prefix_decoder(self.prefix_embedding(pt.tensor(prefix_ids, dtype=pt.long, device=device)), embedding)[-1])).argmax(-1).item()
+            prefix_ids.append(next_token)
+            if next_token == self.eos_id:
+                break
+        
+        spm_ids = [self.bos_id]
+        for _ in range(max_len[1]):
+            next_token = self.spm_linear(self.spm_norm(self.spm_decoder(self.spm_embedding(pt.tensor(spm_ids, dtype=pt.long, device=device)), embedding)[-1])).argmax(-1).item()
+            spm_ids.append(next_token)
+            if next_token == self.eos_id:
+                break
+
+        suffix_ids = [self.bos_id]
+        for _ in range(max_len[2]):
+            next_token = self.suffix_linear(self.suffix_norm(self.suffix_decoder(self.suffix_embedding(pt.tensor(suffix_ids, dtype=pt.long, device=device)), embedding)[-1])).argmax(-1).item()
+            suffix_ids.append(next_token)
+            if next_token == self.eos_id:
+                break
+        
+        return prefix_ids, spm_ids, suffix_ids
+

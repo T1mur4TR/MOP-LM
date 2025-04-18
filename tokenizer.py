@@ -64,7 +64,7 @@ class MOPiece:
     
     def decode_word(self, prefix_ids: Iterable[int], spm_ids: Iterable[int], suffix_ids: Iterable[int]) -> str:
         parts = [self.prefixes[prefix_id] for prefix_id in reversed(prefix_ids)]
-        parts.append(self.spm.decode(spm_ids))
+        parts.append(self.spm.decode(spm_ids).replace(' ', ''))
         parts.extend(self.suffixes[suffix_id] for suffix_id in suffix_ids)
         return ''.join(parts)
 
