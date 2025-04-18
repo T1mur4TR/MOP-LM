@@ -61,8 +61,14 @@ class MOPiece:
                     break
         spm_ids = self.spm.encode(word[l:r])
         return prefix_ids[::-1], spm_ids, suffix_ids[::-1]
+    
+    def decode_word(self, prefix_ids: Iterable[int], spm_ids: Iterable[int], suffix_ids: Iterable[int]) -> str:
+        parts = [self.prefixes[prefix_id] for prefix_id in reversed(prefix_ids)]
+        parts.append(self.spm.decode(spm_ids))
+        parts.extend(self.suffixes[suffix_id] for suffix_id in suffix_ids)
+        return ''.join(parts)
 
-    def encode(self, sentences: Iterable[str], morpheme_first: bool=False) -> List[List[Tuple[List[int], List[int], List[int]]]] | Tuple[List[List[List[int]]], List[List[List[int]]], List[List[List[int]]]]:
+    def encode(self, sentences: Iterable[str], morpheme_first: bool=True) -> List[List[Tuple[List[int], List[int], List[int]]]] | Tuple[List[List[List[int]]], List[List[List[int]]], List[List[List[int]]]]:
         if morpheme_first:
             prefix_tokens = []
             spm_tokens = []
@@ -97,20 +103,14 @@ class MOPiece:
         else:
             return tokenized_sentences
     
-    def decode(self, tokenized_sentences: Iterable[Iterable[Tuple[Iterable[int], Iterable[int], Iterable[int]]]] | Tuple[Iterable[Iterable[Iterable[int]]], Iterable[Iterable[Iterable[int]]], Iterable[Iterable[Iterable[int]]]], morpheme_first: bool=False) -> List[str]:
+    def decode(self, tokenized_sentences: Iterable[Iterable[Tuple[Iterable[int], Iterable[int], Iterable[int]]]] | Tuple[Iterable[Iterable[Iterable[int]]], Iterable[Iterable[Iterable[int]]], Iterable[Iterable[Iterable[int]]]], morpheme_first: bool=True) -> List[str]:
         decoded_sentences = []
         if morpheme_first:
             tokenized_sentences = zip(*tokenized_sentences)
         for sentence_ids in tokenized_sentences:
             if morpheme_first:
                 sentence_ids = zip(*sentence_ids)
-            words = []
-            for prefix_ids, spm_ids, suffix_ids in sentence_ids:
-                parts = [self.prefixes[prefix_id] for prefix_id in reversed(prefix_ids)]
-                parts.append(self.spm.decode(spm_ids))
-                parts.extend(self.suffixes[suffix_id] for suffix_id in suffix_ids)
-                words.append(''.join(parts))
-            decoded_sentences.append(' '.join(words))
+            decoded_sentences.append(' '.join(self.decode_word(prefix_ids, spm_ids, suffix_ids) for prefix_ids, spm_ids, suffix_ids in sentence_ids))
         return decoded_sentences
                     
 
@@ -144,7 +144,7 @@ def train_mopiece(directory_path: str | Path, filepath_iterable: Iterable[str | 
                                     found = True
                                     break
                         yield word[l:r]
-        
+    
     spm = BytesIO()
     SentencePieceTrainer.train(sentence_iterator=stems(), vocab_size=spm_vocab_size, model_type=spm_model_type, model_writer=spm, pad_id=2, unk_id=3, bos_id=0, eos_id=1)
 
