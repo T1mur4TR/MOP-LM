@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 from typing import Tuple, Optional
 
-from common import Encoder, Decoder, RoPEMHSA, MultiheadCrossAttention, FFN
+from common import Encoder, RoPEMHSA, FFN
 
 
 
@@ -104,7 +104,7 @@ class WordDecoder(nn.Module):
             lambda: nn.RMSNorm(prefix_dim)
         )
         self.prefix_norm = nn.RMSNorm(prefix_dim)
-        self.prefix_linear = lambda x: F.linear(x, self.prefix_embedding.weight)
+        self.prefix_linear = nn.Linear(prefix_dim, vocab_size[0])  
 
         assert spm_dim % num_heads == 0
 
@@ -116,7 +116,7 @@ class WordDecoder(nn.Module):
             lambda: nn.RMSNorm(spm_dim)
         )
         self.spm_norm = nn.RMSNorm(spm_dim)
-        self.spm_linear = lambda x: F.linear(x, self.spm_embedding.weight)       
+        self.spm_linear = nn.Linear(spm_dim, vocab_size[1])  
 
         assert suffix_dim % num_heads == 0
 
@@ -128,7 +128,13 @@ class WordDecoder(nn.Module):
             lambda: nn.RMSNorm(suffix_dim)
         )
         self.suffix_norm = nn.RMSNorm(suffix_dim)
-        self.suffix_linear = lambda x: F.linear(x, self.suffix_embedding.weight)
+        self.suffix_linear = nn.Linear(suffix_dim, vocab_size[2])
+
+    def _decode_sequence(self, input_emb, decoder, final_norm, classifier):
+        batch_shape = input_emb.shape[:-2]
+        L = input_emb.shape[-2]
+        mask = pt.tril(pt.ones((*batch_shape, L, L), device=input_emb.device, dtype=pt.bool))
+        return classifier(final_norm(decoder(input_emb, mask)))
 
     def forward(self, prefix_ids, spm_ids, suffix_ids, embedding):
         """
@@ -145,60 +151,190 @@ class WordDecoder(nn.Module):
         """
         embedding = embedding.unsqueeze(-2)
 
-        prefix_pad_mask = F.pad(prefix_ids != self.pad_id, (1, 0), value=True)
-        prefix_attn_mask = pt.tril(prefix_pad_mask.unsqueeze(-1) & prefix_pad_mask.unsqueeze(-2))
-        prefix_emb = pt.concat([self.prefix_proj(embedding), self.prefix_embedding(prefix_ids)], dim=-2)
-        prefix_logits = self.prefix_linear(self.prefix_norm(self.prefix_decoder(prefix_emb, prefix_attn_mask)[..., 1:, :]))
+        prefix_input = pt.cat([self.prefix_proj(embedding), self.prefix_embedding(prefix_ids)], dim=-2)
 
-        spm_pad_mask = F.pad(spm_ids != self.pad_id, (1, 0), value=True)
-        spm_attn_mask = pt.tril(spm_pad_mask.unsqueeze(-1) & spm_pad_mask.unsqueeze(-2))
-        spm_emb = pt.concat([self.spm_proj(embedding), self.spm_embedding(spm_ids)], dim=-2)
-        spm_logits = self.spm_linear(self.spm_norm(self.spm_decoder(spm_emb, spm_attn_mask)[..., 1:, :]))
+        prefix_logits = self._decode_sequence(
+            prefix_input,
+            self.prefix_decoder,
+            self.prefix_norm,
+            self.prefix_linear
+        )[..., 1:, :]
 
-        suffix_pad_mask = F.pad(suffix_ids != self.pad_id, (1, 0), value=True)
-        suffix_attn_mask = pt.tril(suffix_pad_mask.unsqueeze(-1) & suffix_pad_mask.unsqueeze(-2))
-        suffix_emb = pt.concat([self.suffix_proj(embedding), self.suffix_embedding(suffix_ids)], dim=-2)
-        suffix_logits = self.suffix_linear(self.suffix_norm(self.suffix_decoder(suffix_emb, suffix_attn_mask)[..., 1:, :]))
+        spm_input = pt.cat([self.spm_proj(embedding), self.spm_embedding(spm_ids)], dim=-2)
+
+        spm_logits = self._decode_sequence(
+            spm_input,
+            self.spm_decoder,
+            self.spm_norm,
+            self.spm_linear
+        )[..., 1:, :]
+
+        suffix_input = pt.cat([self.suffix_proj(embedding), self.suffix_embedding(suffix_ids)], dim=-2)
+
+        suffix_logits = self._decode_sequence(
+            suffix_input,
+            self.suffix_decoder,
+            self.suffix_norm,
+            self.suffix_linear
+        )[..., 1:, :]
 
         return prefix_logits, spm_logits, suffix_logits
-    
+
     @pt.inference_mode()
     def inference(self, embedding, max_len=64):
         self.eval()
         if isinstance(max_len, int):
             max_len = (max_len, max_len, max_len)
 
-        embedding = embedding.unsqueeze(-2)
         device = embedding.device
 
+        embedding = embedding.unsqueeze(-2)
+
         prefix_ids = [self.bos_id]
-        prefix_emb = pt.concat([self.prefix_proj(embedding), self.prefix_embedding(pt.tensor(prefix_ids, dtype=pt.long, device=device))], dim=-2)
+        prefix_emb_proj = self.prefix_proj(embedding)
+
         for _ in range(max_len[0]):
-            next_token = self.prefix_linear(self.prefix_norm(self.prefix_decoder(prefix_emb, pt.tril(pt.ones((len(prefix_ids) + 1,)*2, dtype=pt.bool, device=device)))[-1])).argmax(-1)
-            prefix_emb = pt.concat([prefix_emb, self.prefix_embedding(next_token).unsqueeze(-2)], dim=-2)
-            next_token = next_token.item()
+            curr_seq = pt.tensor(prefix_ids, device=device, dtype=pt.long)
+            curr_emb = self.prefix_embedding(curr_seq)
+            curr_input = pt.cat([prefix_emb_proj, curr_emb], dim=-2)
+
+            logits = self._decode_sequence(
+                curr_input,
+                self.prefix_decoder,
+                self.prefix_norm,
+                self.prefix_linear
+            )
+
+            next_token = logits[-1].argmax(-1).item()
             prefix_ids.append(next_token)
+
             if next_token == self.eos_id:
                 break
-        
+
         spm_ids = [self.bos_id]
-        spm_emb = pt.concat([self.spm_proj(embedding), self.spm_embedding(pt.tensor(spm_ids, dtype=pt.long, device=device))], dim=-2)
+        spm_emb_proj = self.spm_proj(embedding)
+
         for _ in range(max_len[1]):
-            next_token = self.spm_linear(self.spm_norm(self.spm_decoder(spm_emb, pt.tril(pt.ones((len(spm_ids) + 1,)*2, dtype=pt.bool, device=device)))[-1])).argmax(-1)
-            spm_emb = pt.concat([spm_emb, self.spm_embedding(next_token).unsqueeze(-2)], dim=-2)
-            next_token = next_token.item()
+            curr_seq = pt.tensor(spm_ids, device=device, dtype=pt.long)
+            curr_emb = self.spm_embedding(curr_seq)
+            curr_input = pt.cat([spm_emb_proj, curr_emb], dim=-2)
+
+            logits = self._decode_sequence(
+                curr_input,
+                self.spm_decoder,
+                self.spm_norm,
+                self.spm_linear
+            )
+
+            next_token = logits[-1].argmax(-1).item()
             spm_ids.append(next_token)
+
             if next_token == self.eos_id:
                 break
 
         suffix_ids = [self.bos_id]
-        suffix_emb = pt.concat([self.suffix_proj(embedding), self.suffix_embedding(pt.tensor(suffix_ids, dtype=pt.long, device=device))], dim=-2)
+        suffix_emb_proj = self.suffix_proj(embedding)
+
         for _ in range(max_len[2]):
-            next_token = self.suffix_linear(self.suffix_norm(self.suffix_decoder(suffix_emb, pt.tril(pt.ones((len(suffix_ids) + 1,)*2, dtype=pt.bool, device=device)))[-1])).argmax(-1)
-            suffix_emb = pt.concat([suffix_emb, self.suffix_embedding(next_token).unsqueeze(-2)], dim=-2)
-            next_token = next_token.item()
+            curr_seq = pt.tensor(suffix_ids, device=device, dtype=pt.long)
+            curr_emb = self.suffix_embedding(curr_seq)
+            curr_input = pt.cat([suffix_emb_proj, curr_emb], dim=-2)
+
+            logits = self._decode_sequence(
+                curr_input,
+                self.suffix_decoder,
+                self.suffix_norm,
+                self.suffix_linear
+            )
+
+            next_token = logits[-1].argmax(-1).item()
             suffix_ids.append(next_token)
+
             if next_token == self.eos_id:
                 break
+
+        return prefix_ids, spm_ids, suffix_ids
+
+    @pt.inference_mode()
+    def beam_search(self, embedding, beam_size=5, max_len=64, length_penalty=.5):
+        self.eval()
+        if isinstance(max_len, int):
+            max_len = (max_len, max_len, max_len)
+
+        device = embedding.device
+
+        embedding = embedding.unsqueeze(-2)
+
+        def _beam_search_component(emb_proj, embedding_fn, decoder, norm_fn, classifier_fn, max_seq_len):
+            sequences = [(
+                [self.bos_id],
+                0.0,
+                None
+            )]
+
+            for step in range(max_seq_len):
+                candidates = []
+
+                for seq, score, _ in sequences:
+                    if seq[-1] == self.eos_id:
+                        candidates.append((seq, score, None))
+                        continue
+
+                    curr_input_ids = pt.tensor(seq, device=device)
+                    curr_emb = embedding_fn(curr_input_ids)
+                    curr_input = pt.cat([emb_proj, curr_emb], dim=-2)
+
+                    logits = self._decode_sequence(curr_input, decoder, norm_fn, classifier_fn)[..., -1, :]
+
+                    log_probs = F.log_softmax(logits, dim=-1)
+                    topk_log_probs, topk_indices = log_probs.topk(beam_size)
+
+                    for i in range(beam_size):
+                        token_id = topk_indices[i].item()
+                        token_score = topk_log_probs[i].item()
+
+                        new_seq = seq + [token_id]
+                        new_score = score + token_score
+
+                        if token_id == self.eos_id:
+                            new_score = new_score / ((len(new_seq) - 1) ** length_penalty)
+
+                        candidates.append((new_seq, new_score, None))
+
+                candidates.sort(key=lambda x: x[1], reverse=True)
+
+                sequences = candidates[:beam_size]
+
+                if all(seq[-1] == self.eos_id for seq, _, _ in sequences):
+                    break
+
+            return sequences[0][0]
+
+        prefix_ids = _beam_search_component(
+            self.prefix_proj(embedding),
+            self.prefix_embedding,
+            self.prefix_decoder,
+            self.prefix_norm,
+            self.prefix_linear,
+            max_len[0]
+        )
+
+        spm_ids = _beam_search_component(
+            self.spm_proj(embedding),
+            self.spm_embedding,
+            self.spm_decoder,
+            self.spm_norm,
+            self.spm_linear,
+            max_len[1]
+        )
+
+        suffix_ids = _beam_search_component(
+            self.suffix_proj(embedding),
+            self.suffix_embedding,
+            self.suffix_decoder,
+            self.suffix_norm,
+            self.suffix_linear,
+            max_len[2]
+        )
 
         return prefix_ids, spm_ids, suffix_ids
