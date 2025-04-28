@@ -9,7 +9,7 @@ from common import Encoder, RoPEMHSA, FFN
 
 
 class WordEncoder(nn.Module):
-    def __init__(self, vocab_size: Tuple[int, int, int], pad_id: int, embedding_dim: int, spm_dim: Optional[int]=None, suffix_dim: Optional[int]=None, prefix_dim: Optional[int]=None, spm_layers: int=3, spm_heads : int=8, spm_rope_cache: int=64, ffn_hidden_dim: Optional[int]=None, expansion_factor: int=2, dropout: float=0.):
+    def __init__(self, vocab_size: Tuple[int, int, int], pad_id: int, embedding_dim: int, spm_dim: Optional[int]=None, suffix_dim: Optional[int]=None, prefix_dim: Optional[int]=None, spm_layers: int=3, spm_heads: int=8, spm_rope_cache: int=64, ffn_hidden_dim: Optional[int]=None, prefix_depth: int=2, suffix_depth: int=2, expansion_factor: int=2, dropout: float=0.):
         super().__init__()
 
         if spm_dim is None:
@@ -25,6 +25,7 @@ class WordEncoder(nn.Module):
         assert spm_dim % spm_heads == 0
 
         self.spm_embedding = nn.Embedding(vocab_size[1], spm_dim, padding_idx=pad_id)
+        nn.init.normal_(self.spm_embedding.weight, std=.1)
         self.spm_encoder = Encoder(spm_layers, 
             lambda: RoPEMHSA(spm_dim, spm_dim // spm_heads, spm_dim // spm_heads, spm_heads, dropout, spm_rope_cache), 
             lambda: FFN(spm_dim, spm_dim * expansion_factor if ffn_hidden_dim is None else ffn_hidden_dim, dropout), 
@@ -34,17 +35,27 @@ class WordEncoder(nn.Module):
         self.spm_final_q = nn.Parameter(pt.zeros(spm_heads, spm_dim // spm_heads))
         self.spm_final_k = nn.Linear(spm_dim, spm_dim)
         self.spm_final_v = nn.Linear(spm_dim, spm_dim)
-        self.spm_final_proj = nn.Linear(spm_dim, embedding_dim)
+        self.spm_final_proj = nn.Sequential(nn.Linear(spm_dim, embedding_dim), nn.RMSNorm(embedding_dim))
 
         self.suffix_embedding = nn.Embedding(vocab_size[2], suffix_dim, padding_idx=pad_id)
-        self.suffix_linear = nn.Linear(suffix_dim, embedding_dim * expansion_factor)
+        nn.init.normal_(self.suffix_embedding.weight, std=.1)
+        self.suffix_ups = nn.ModuleList([nn.Linear(embedding_dim, embedding_dim * expansion_factor, bias=False) for _ in range(suffix_depth)])
+        self.suffix_downs = nn.ModuleList([nn.Linear(embedding_dim * expansion_factor, embedding_dim, bias=False) for _ in range(suffix_depth)])
+        for linear in self.suffix_downs:
+            nn.init.zeros_(linear.weight)
+        self.suffix_linears = nn.ModuleList([nn.Linear(suffix_dim, embedding_dim * expansion_factor, bias=False) for _ in range(suffix_depth)])
+        self.suffix_final_norm = nn.RMSNorm(embedding_dim)
 
         self.prefix_embedding = nn.Embedding(vocab_size[0], prefix_dim, padding_idx=pad_id)
-        self.prefix_linear = nn.Linear(prefix_dim, embedding_dim * expansion_factor)
+        nn.init.normal_(self.prefix_embedding.weight, std=.1)
+        self.prefix_ups = nn.ModuleList([nn.Linear(embedding_dim, embedding_dim * expansion_factor, bias=False) for _ in range(prefix_depth)])
+        self.prefix_downs = nn.ModuleList([nn.Linear(embedding_dim * expansion_factor, embedding_dim, bias=False) for _ in range(prefix_depth)])
+        for linear in self.prefix_downs:
+            nn.init.zeros_(linear.weight)
+        self.prefix_linears = nn.ModuleList([nn.Linear(prefix_dim, embedding_dim * expansion_factor, bias=False) for _ in range(prefix_depth)])
+        self.prefix_final_norm = nn.RMSNorm(embedding_dim)
 
-        self.word_up = nn.Linear(embedding_dim, embedding_dim * expansion_factor)
-        self.word_down = nn.Linear(embedding_dim * expansion_factor, embedding_dim)
-        self.relu = nn.ReLU()
+        self.silu = nn.SiLU()
 
     def forward(self, prefix_ids, spm_ids, suffix_ids):
         """
@@ -68,11 +79,15 @@ class WordEncoder(nn.Module):
 
         suffix_emb = self.suffix_embedding(suffix_ids)
         for i in range(suffix_ids.shape[-1]):
-            word_emb = word_emb + self.word_down(self.relu(self.word_up(word_emb)) * self.suffix_linear(suffix_emb[..., i, :]))
+            for up, down, linear in zip(self.suffix_ups, self.suffix_downs, self.suffix_linears):
+                word_emb = word_emb + down(self.silu(up(word_emb)) * linear(suffix_emb[..., i, :]))
+        word_emb = self.suffix_final_norm(word_emb)
         
         prefix_emb = self.prefix_embedding(prefix_ids)
         for i in range(prefix_ids.shape[-1]):
-            word_emb = word_emb + self.word_down(self.relu(self.word_up(word_emb)) * self.prefix_linear(prefix_emb[..., i, :]))
+            for up, down, linear in zip(self.prefix_ups, self.prefix_downs, self.prefix_linears):
+                word_emb = word_emb + down(self.silu(up(word_emb)) * linear(prefix_emb[..., i, :]))
+        word_emb = self.prefix_final_norm(word_emb)
 
         return word_emb
 
