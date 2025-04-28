@@ -49,7 +49,7 @@ class DependencyParser(nn.Module):
             padding_mask (torch.Tensor): boolean padding mask with shape [..., L]
 
         Returns:
-            torch.Tensor: dependency logits tensors with shape [..., L, L + 1]
+            torch.Tensor: dependency logits tensor with shape [..., L, L + 1]
         """
         if padding_mask is not None:
             padding_mask = F.pad(padding_mask, (1, 0), value=True)
@@ -65,3 +65,35 @@ class DependencyParser(nn.Module):
         k_embeddings = self.final_k_norm(self.final_k(embeddings, attn_mask))
 
         return pt.matmul(q_embeddings, k_embeddings.transpose(-1, -2))
+    
+    @pt.inference_mode()
+    def inference(self, embeddings):
+        """
+        Args:
+            embeddings (torch.Tensor): float embeddings tensor with shape [L, E]
+
+        Returns:
+            torch.Tensor: dependency index tensor with shape [L]
+        """
+        self.eval()
+        L, _ = embeddings.shape
+        logits = self.forward(embeddings)
+        probs = F.softmax(logits, dim=-1)
+
+        heads = [None] * L
+        found = 0
+        while found < L:
+            idx = pt.argmax(probs).item()
+            from_idx, to_idx = idx // (L + 1), idx % (L + 1)
+            probs[from_idx][to_idx] = 0.
+            if heads[from_idx] is not None:
+                continue
+            cur = to_idx - 1
+            while cur != -1 and heads[cur] is not None:
+                cur = heads[cur] - 1
+            if cur == from_idx:
+                continue
+            heads[from_idx] = to_idx
+            found += 1
+        
+        return pt.tensor(heads, dtype=pt.long, device=embeddings.device)
