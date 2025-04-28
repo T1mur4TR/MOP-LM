@@ -114,37 +114,44 @@ class MOPiece:
         return decoded_sentences
                     
 
-def train_mopiece(directory_path: str | Path, filepath_iterable: Iterable[str | Path], prefixes: Iterable[str], suffixes: Iterable[str], spm_vocab_size: int, spm_model_type: str='unigram', min_stem: int=3):
+def train_mopiece(directory_path: str | Path, sentence_iterable: Iterable[str | Path], prefixes: Iterable[str], suffixes: Iterable[str], spm_vocab_size: int, spm_model_type: str='bpe', min_stem: int=3, filepaths: bool=True):
     prefixes_set = set(prefixes)
     suffixes_set = set(suffixes)
     reg = re.compile(r'([^\p{L}\p{M}\p{N}\s]+|\s)')
-    def stems():
-        for file in filepath_iterable:
-            with open(file, mode='r', encoding='utf8') as file:
-                for line in file.readlines():
-                    for word in reg.split(line):
-                        if word == '' or word == ' ':
-                            continue
-                        word = word.lower()
-                        l, r = 0, len(word)
+    def handle_sent(sent):
+        for word in reg.split(sent):
+            if word == '' or word == ' ':
+                continue
+            word = word.lower()
+            l, r = 0, len(word)
+            found = True
+            while found:
+                found = False
+                for i in range(l + min_stem, r):
+                    if word[i:r] in suffixes_set:
+                        r = i
                         found = True
-                        while found:
-                            found = False
-                            for i in range(l + min_stem, r):
-                                if word[i:r] in suffixes_set:
-                                    r = i
-                                    found = True
-                                    break
+                        break
+            found = True
+            while found:
+                found = False
+                for i in range(r - min_stem, l, -1):
+                    if word[l:i] in prefixes_set:
+                        l = i
                         found = True
-                        while found:
-                            found = False
-                            for i in range(r - min_stem, l, -1):
-                                if word[l:i] in prefixes_set:
-                                    l = i
-                                    found = True
-                                    break
-                        yield word[l:r]
-    
+                        break
+            yield word[l:r]
+    if filepaths:
+        def stems():
+            for file in sentence_iterable:
+                with open(file, mode='r', encoding='utf8') as file:
+                    for line in file.readlines():
+                        yield from handle_sent(line)
+    else:
+        def stems():
+            for sent in sentence_iterable:
+                yield from handle_sent(sent)
+        
     spm = BytesIO()
     SentencePieceTrainer.train(sentence_iterator=stems(), vocab_size=spm_vocab_size, model_type=spm_model_type, model_writer=spm, pad_id=2, unk_id=3, bos_id=0, eos_id=1)
 
