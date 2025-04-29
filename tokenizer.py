@@ -114,7 +114,7 @@ class MOPiece:
         return decoded_sentences
                     
 
-def train_mopiece(directory_path: str | Path, sentence_iterable: Iterable[str | Path], prefixes: Iterable[str], suffixes: Iterable[str], spm_vocab_size: int, spm_model_type: str='bpe', min_stem: int=3, filepaths: bool=True):
+def train_mopiece(directory_path: str | Path, text_iterable: Iterable[str | Path], prefixes: Iterable[str], suffixes: Iterable[str], spm_vocab_size: int, spm_model_type: str='bpe', min_stem: int=3, filepaths: bool=True):
     prefixes_set = set(prefixes)
     suffixes_set = set(suffixes)
     reg = re.compile(r'([^\p{L}\p{M}\p{N}\s]+|\s)')
@@ -143,13 +143,13 @@ def train_mopiece(directory_path: str | Path, sentence_iterable: Iterable[str | 
             yield word[l:r]
     if filepaths:
         def stems():
-            for file in sentence_iterable:
+            for file in text_iterable:
                 with open(file, mode='r', encoding='utf8') as file:
                     for line in file.readlines():
                         yield from handle_sent(line)
     else:
         def stems():
-            for sent in sentence_iterable:
+            for sent in text_iterable:
                 yield from handle_sent(sent)
         
     spm = BytesIO()

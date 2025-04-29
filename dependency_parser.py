@@ -73,7 +73,7 @@ class DependencyParser(nn.Module):
             embeddings (torch.Tensor): float embeddings tensor with shape [L, E]
 
         Returns:
-            torch.Tensor: dependency index tensor with shape [L]
+            list: dependency index list with shape [L]
         """
         self.eval()
         L, _ = embeddings.shape
@@ -96,4 +96,4 @@ class DependencyParser(nn.Module):
             heads[from_idx] = to_idx
             found += 1
         
-        return pt.tensor(heads, dtype=pt.long, device=embeddings.device)
+        return heads
